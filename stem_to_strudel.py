@@ -32,7 +32,7 @@ def detect_single_pitch(audio_chunk, thresh=-50.0):
         
     rate = audio_chunk.frame_rate
     n = len(samples)
-    if n < 256: # Allow processing of very small chunks
+    if n < 256: 
         return None
 
     fft_data = np.abs(rfft(samples))
@@ -58,7 +58,6 @@ def detect_single_pitch(audio_chunk, thresh=-50.0):
         
     energy_ratio = peak_mag / total_energy
     
-    # Highly isolated fundamental peak means it is a single note
     if energy_ratio > 0.08:
         return hz_to_note(peak_freq)
     return None
@@ -66,9 +65,50 @@ def detect_single_pitch(audio_chunk, thresh=-50.0):
 def is_chunk_blank(audio_chunk, silence_thresh=-50.0):
     return audio_chunk.dBFS < silence_thresh
 
+def update_readme(output_dir, metadata):
+    """
+    Generates or parses an existing README.md file to output an up-to-date
+    Markdown log layout compiling tracks, keys, and usage credits.
+    """
+    readme_path = os.path.join(output_dir, "README.md")
+    
+    # Header templates
+    header_title = "# Strudel Sample Vault Catalog\n\n"
+    table_header = "| Track Identifier | BPM | Key | Credit / Attribution | Source Reference URL |\n| :--- | :---: | :---: | :--- | :--- |\n"
+    
+    # Build dictionary rows
+    rows = {}
+    
+    # Read existing table if file is present to update records in place safely
+    if os.path.exists(readme_path):
+        with open(readme_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for line in lines:
+            if line.startswith("|") and not "Track Identifier" in line and not ":---" in line:
+                parts = [p.strip() for p in line.split("|")][1:-1]
+                if len(parts) >= 5:
+                    track_id = parts[0]
+                    rows[track_id] = line
+                    
+    # Generate / Update rows from current metadata pool state
+    for track_id, meta in metadata.items():
+        url_md = f"[Source Link]({meta['source_url']})" if meta['source_url'] else "N/A"
+        credit_str = meta['credit'] if meta['credit'] else "Unknown"
+        rows[track_id] = f"| **{track_id}** | {meta['bpm']} | {meta['key'].upper()} | {credit_str} | {url_md} |\n"
+
+    # Write out cleanly structured document
+    with open(readme_path, "w", encoding="utf-8") as f:
+        f.write(header_title)
+        f.write("This file is automatically managed by the CLI processing tool to log sample origins for simple copy-pasting into track releases.\n\n")
+        f.write(table_header)
+        for track_id in sorted(rows.keys()):
+            f.write(rows[track_id])
+            
+    print(f"Updated cleartext tracking index documentation at: {readme_path}")
+
 def process_cli():
     parser = argparse.ArgumentParser(
-        description="Slice stem files with gap-aware pitch detection exclusively on 'short' fragments."
+        description="Slice stem files with gap-aware pitch detection and maintain a markdown README.md log repository file."
     )
     parser.add_argument("--file", required=True, help="Path to your audio stem file")
     parser.add_argument("--bpm", type=float, required=True, help="Tempo of the track")
@@ -117,14 +157,13 @@ def process_cli():
     samples_bar = []
     samples_long = []
 
-    # --- 1. PROCESS SHORTS VIA SILENCE/GAP DETECTION ---
+    # 1. PROCESS SHORTS (Gap-based segmentation)
     print("Extracting dynamic shorts using gap analysis...")
-    # split_on_silence crops chunks naturally at structural zero-crossings or silence boundaries
     short_chunks = split_on_silence(
         aligned_audio, 
         min_silence_len=args.min_silence_len, 
         silence_thresh=args.thresh,
-        keep_silence=50 # Leave a tiny 50ms buffer edge so notes aren't abruptly choked
+        keep_silence=50 
     )
     
     for i, chunk in enumerate(short_chunks):
@@ -133,14 +172,13 @@ def process_cli():
             rel_path = f"{folder_short}/{filename}"
             chunk.export(os.path.join(args.output_dir, folder_short, filename), format=file_ext)
             
-            # Pitch detection is RUN EXCLUSIVELY HERE on short notes
             detected_note = detect_single_pitch(chunk, args.thresh)
             if detected_note:
                 samples_short.append({detected_note: rel_path})
             else:
                 samples_short.append(rel_path)
 
-    # --- 2. PROCESS BARS (STRICT GRID - NO PITCH DETECTION) ---
+    # 2. PROCESS BARS (Strict Grid)
     print("Slicing rigid bars...")
     total_bars = math.ceil(total_ms / ms_per_bar)
     for i in range(total_bars):
@@ -151,7 +189,7 @@ def process_cli():
             chunk.export(os.path.join(args.output_dir, folder_bar, filename), format=file_ext)
             samples_bar.append(rel_path)
 
-    # --- 3. PROCESS LONGS (STRICT GRID - NO PITCH DETECTION) ---
+    # 3. PROCESS LONGS (Strict Grid)
     print("Slicing rigid long phrases...")
     total_longs = math.ceil(total_ms / ms_per_long)
     for i in range(total_longs):
@@ -162,7 +200,7 @@ def process_cli():
             chunk.export(os.path.join(args.output_dir, folder_long, filename), format=file_ext)
             samples_long.append(rel_path)
 
-    # --- 4. MASTER JSON STORAGE UPDATE ---
+    # 4. MASTER JSON STORAGE UPDATE
     master_data = {}
     if os.path.exists(args.json_path):
         try:
@@ -191,8 +229,10 @@ def process_cli():
     with open(args.json_path, "w") as f:
         json.dump(master_data, f, indent=2, sort_keys=True)
 
-    print(f"\nSuccessfully stored '{base_name}' inside target database map at '{args.json_path}'!")
-    print(f"Stats -> Shorts (Gap Detected): {len(samples_short)}, Bars: {len(samples_bar)}, Longs: {len(samples_long)}")
+    # 5. WRITE MARKDOWN README COMPILATION DOCUMENTATION
+    update_readme(args.output_dir, master_data["_metadata"])
+
+    print(f"\nSuccessfully stored '{base_name}' in '{args.json_path}'!")
 
 if __name__ == "__main__":
     process_cli()
