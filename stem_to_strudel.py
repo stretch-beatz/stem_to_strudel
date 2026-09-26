@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 import os
+import re
 import sys
 import json
 import math
 import argparse
+import urllib.request
 import numpy as np
 from scipy.fft import rfft, rfftfreq
 from pydub import AudioSegment
@@ -65,6 +67,41 @@ def detect_single_pitch(audio_chunk, thresh=-50.0):
 def is_chunk_blank(audio_chunk, silence_thresh=-50.0):
     return audio_chunk.dBFS < silence_thresh
 
+def fetch_track_metadata(url):
+    """
+    Pulls the schema.org JSON-LD block that sites like Looperman embed in their
+    track detail pages and extracts name/artist/bpm/key so they don't need to
+    be typed in by hand.
+    """
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        html = resp.read().decode("utf-8", errors="replace")
+
+    ld_match = re.search(r'<script type="application/ld\+json">(.*?)</script>', html, re.S)
+    if not ld_match:
+        raise ValueError("No structured metadata block found on page")
+
+    data = json.loads(ld_match.group(1))
+
+    name = data.get("name", "")
+    artist = (data.get("byArtist") or {}).get("name") or (data.get("creator") or {}).get("name") or ""
+    description = data.get("description", "")
+    keywords = data.get("keywords", "")
+
+    bpm_match = re.search(r'(\d+(?:\.\d+)?)\s*bpm', keywords, re.I) or re.search(r'(\d+(?:\.\d+)?)\s*bpm', description, re.I)
+    bpm = float(bpm_match.group(1)) if bpm_match else None
+
+    key_match = re.search(r'key is ([A-G][#b]?\s*(?:major|minor|maj|min)?)', description, re.I)
+    key = key_match.group(1).strip() if key_match else ""
+
+    return {
+        "name": name,
+        "artist": artist,
+        "bpm": bpm,
+        "key": key,
+        "source_url": data.get("url", url),
+    }
+
 def update_readme(output_dir, metadata):
     """
     Generates or parses an existing README.md file to output an up-to-date
@@ -111,23 +148,49 @@ def process_cli():
         description="Slice stem files with gap-aware pitch detection and maintain a markdown README.md log repository file."
     )
     parser.add_argument("--file", required=True, help="Path to your audio stem file")
-    parser.add_argument("--bpm", type=float, required=True, help="Tempo of the track")
-    parser.add_argument("--key", default="unknown", help="The global musical key of the stem track")
-    parser.add_argument("--name", help="Custom root name variable")
+    parser.add_argument("--bpm", type=float, default=None, help="Tempo of the track (auto-filled from --url if omitted)")
+    parser.add_argument("--key", default=None, help="The global musical key of the stem track (auto-filled from --url if omitted)")
+    parser.add_argument("--name", help="Custom root name variable (auto-filled from --url if omitted)")
     parser.add_argument("--beats", type=int, default=4, help="Beats per bar")
     parser.add_argument("--long-bars", type=int, default=4, help="Bars per long section")
-    parser.add_argument("--thresh", type=float, default=-50.0, help="Silence threshold level in dBFS")
+    parser.add_argument("--thresh", type=float, default=-35.0, help="Silence threshold level in dBFS")
     parser.add_argument("--min-silence-len", type=int, default=100, help="Minimum length of silence to split short notes (in ms)")
-    parser.add_argument("--json-path", default="strudel.json", help="Path to your master JSON structure file")
+    parser.add_argument("--json-path", help="Path to your master JSON structure file (defaults to <output-dir>/strudel.json)")
     parser.add_argument("--output-dir", default="strudel_samples", help="Root directory folder output destination")
     parser.add_argument("--url", default="", help="Origin attribution URL link")
     parser.add_argument("--credit", default="", help="Copyright or attribution details")
 
     args = parser.parse_args()
+    if args.json_path is None:
+        args.json_path = os.path.join(args.output_dir, "strudel.json")
 
     if not os.path.exists(args.file):
         print(f"Error: Target path '{args.file}' does not exist.")
         sys.exit(1)
+
+    scraped = None
+    if args.url:
+        try:
+            scraped = fetch_track_metadata(args.url)
+            print(f"Fetched metadata from URL: '{scraped['name']}' by {scraped['artist'] or 'Unknown'}")
+        except Exception as e:
+            print(f"Warning: could not fetch metadata from '{args.url}' ({e}); falling back to manual arguments.")
+
+    if args.bpm is None:
+        if scraped and scraped.get("bpm"):
+            args.bpm = scraped["bpm"]
+        else:
+            print("Error: --bpm was not provided and could not be determined from --url.")
+            sys.exit(1)
+
+    if not args.name and scraped and scraped.get("name"):
+        args.name = scraped["name"]
+
+    if not args.key:
+        args.key = (scraped.get("key") if scraped else "") or "unknown"
+
+    if not args.credit and scraped and scraped.get("artist"):
+        args.credit = scraped["artist"]
 
     raw_name = args.name if args.name else os.path.splitext(os.path.basename(args.file))[0]
     base_name = raw_name.strip().lower().replace(" ", "_")
@@ -147,11 +210,11 @@ def process_cli():
     print(f"Opening file: {args.file}")
     audio = AudioSegment.from_file(args.file)
     
-    start_trim_ms = detect_leading_silence(audio, silence_thresh=args.thresh)
+    start_trim_ms = detect_leading_silence(audio, silence_threshold=args.thresh)
     print(f"Stripping leading space: {start_trim_ms}ms dropped.")
     aligned_audio = audio[start_trim_ms:]
     total_ms = len(aligned_audio)
-    file_ext = os.path.splitext(args.file).replace(".", "")
+    file_ext = os.path.splitext(args.file)[1].replace(".", "")
 
     samples_short = []
     samples_bar = []
@@ -168,7 +231,7 @@ def process_cli():
     
     for i, chunk in enumerate(short_chunks):
         if len(chunk) > 0 and not is_chunk_blank(chunk, args.thresh):
-            filename = f"short_{str(i + 1).zfill(3)}.{file_ext}"
+            filename = f"short_{str(i).zfill(3)}.{file_ext}"
             rel_path = f"{folder_short}/{filename}"
             chunk.export(os.path.join(args.output_dir, folder_short, filename), format=file_ext)
             
@@ -184,7 +247,7 @@ def process_cli():
     for i in range(total_bars):
         chunk = aligned_audio[int(i * ms_per_bar) : int((i + 1) * ms_per_bar)]
         if len(chunk) > 0 and not is_chunk_blank(chunk, args.thresh):
-            filename = f"bar_{str(i + 1).zfill(2)}.{file_ext}"
+            filename = f"bar_{str(i).zfill(2)}.{file_ext}"
             rel_path = f"{folder_bar}/{filename}"
             chunk.export(os.path.join(args.output_dir, folder_bar, filename), format=file_ext)
             samples_bar.append(rel_path)
@@ -195,7 +258,7 @@ def process_cli():
     for i in range(total_longs):
         chunk = aligned_audio[int(i * ms_per_long) : int((i + 1) * ms_per_long)]
         if len(chunk) > 0 and not is_chunk_blank(chunk, args.thresh):
-            filename = f"long_{str(i + 1).zfill(2)}.{file_ext}"
+            filename = f"long_{str(i).zfill(2)}.{file_ext}"
             rel_path = f"{folder_long}/{filename}"
             chunk.export(os.path.join(args.output_dir, folder_long, filename), format=file_ext)
             samples_long.append(rel_path)
