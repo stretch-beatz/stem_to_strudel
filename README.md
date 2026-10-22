@@ -24,7 +24,7 @@ python3 stem_to_strudel.py \
   --url "https://www.looperman.com/acapellas/detail/20691/fatafat-95bpm-pop-acapella"
 ```
 
-When the page provides structured metadata, the script fills in the BPM, track name, key, artist credit, vocal gender, and genre. You can provide `--bpm`, `--key`, `--name`, or `--credit` to supply or override those values. BPM is required if it cannot be fetched from the URL. If the key or vocal metadata is unavailable, the catalog records it as unknown.
+When the page provides structured metadata, the script fills in the BPM, track name, key, artist credit, vocal gender, and genre. For fetched titles, a trailing `by Artist` suffix is treated as attribution, and a title emphasized with asterisks is used as the track name (for example, `AMVIS - *SoCold* - Hybrid Trap Type Vocals` becomes `SoCold`). You can provide `--bpm`, `--key`, `--name`, or `--credit` to supply or override those values. BPM is required if it cannot be fetched from the URL. If the key or vocal metadata is unavailable, the catalog records it as unknown.
 
 You can also run it without a source URL by entering the BPM yourself:
 
@@ -68,6 +68,17 @@ python3 stem_to_strudel.py --refresh-metadata \
 
 Tracks without a saved source URL are skipped with a warning. Use `--json-path` if the index is stored somewhere other than `<output-dir>/strudel.json`.
 
+## Rebuild the catalog
+
+Regenerate `README.md` from the JSON index without processing audio or fetching metadata:
+
+```bash
+python3 stem_to_strudel.py --rebuild-readme \
+  --output-dir /path/to/strudel-sample-backup
+```
+
+Use `--json-path` if the index is stored somewhere other than `<output-dir>/strudel.json`. The command requires the JSON index to exist.
+
 ## Output
 
 By default, files are written under `strudel_samples/`. The script creates:
@@ -76,7 +87,7 @@ By default, files are written under `strudel_samples/`. The script creates:
 - `<name>_bar/` — chunks aligned to a fixed number of beats per bar.
 - `<name>_long/` — chunks aligned to a fixed number of bars.
 - `strudel.json` — sample paths and metadata, including BPM, key, vocal gender, genre, credit, and source URL.
-- `README.md` — a Markdown catalog of the samples and their metadata.
+- `README.md` — a Markdown catalog generated from `strudel.json` metadata, sorted by genre, numeric BPM, key, then track name. The JSON is the source of truth; manual edits to the generated catalog are overwritten.
 
 The default sample name is based on the source track title when available (the uploader/artist suffix is removed), or the audio filename otherwise. Use `--name` to set it explicitly. Use `--output-dir` to change the output directory. Use `--json-path` to store the JSON index at a different path.
 
@@ -84,9 +95,10 @@ The default sample name is based on the source track title when available (the u
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `--file` | Required (unless either metadata-only flag is used) | Audio stem to process. |
+| `--file` | Required (unless a metadata-only mode is used) | Audio stem to process. |
 | `--metadata-only` | Off | Update only the JSON metadata and catalog table; no audio processing. |
 | `--refresh-metadata` | Off | Rescan source URLs and fill missing/unknown JSON metadata; no audio processing. |
+| `--rebuild-readme` | Off | Regenerate the README catalog from JSON metadata only; no audio processing or metadata fetching. |
 | `--url` | None | Source URL; used to fetch track metadata and attribution. |
 | `--bpm` | From URL | Track tempo. Required if it cannot be fetched. |
 | `--key` | From URL or `unknown` | Track key (e.g. `F major`, `Am`, `a#:minor`). Stored in Strudel format, e.g. `f:major`; a key with no mode is treated as major. |

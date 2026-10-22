@@ -80,6 +80,26 @@ def normalize_key(key):
     is_minor = bool(mode) and mode.lower() in ("minor", "min", "m")
     return f"{note.lower()}{accidental.lower()}:{'minor' if is_minor else 'major'}"
 
+def normalize_track_name(name, artist=""):
+    name = str(name or "").strip()
+    if artist:
+        name = re.sub(
+            rf"\s*(?:[-–—|]\s*|\bby\s+){re.escape(artist)}\s*$",
+            "",
+            name,
+            flags=re.I,
+        ).strip()
+    if re.search(r"\s+\bby\b\s+.+$", name, re.I):
+        name = re.sub(r"\s+\bby\b\s+.+$", "", name, flags=re.I).strip()
+
+    title_parts = re.split(r"\s+[-–—|]\s+", name)
+    if (
+        len(title_parts) == 3
+        and re.search(r"\btype\s+vocals?\b", title_parts[-1], re.I)
+    ):
+        return title_parts[1].strip()
+    return name
+
 def fetch_track_metadata(url):
     """
     Pulls the schema.org JSON-LD block that sites like Looperman embed in their
@@ -98,13 +118,7 @@ def fetch_track_metadata(url):
 
     name = data.get("name", "")
     artist = (data.get("byArtist") or {}).get("name") or (data.get("creator") or {}).get("name") or ""
-    if name and artist:
-        name = re.sub(
-            rf"\s*(?:[-–—|]\s*|\bby\s+){re.escape(artist)}\s*$",
-            "",
-            name,
-            flags=re.I,
-        ).strip()
+    name = normalize_track_name(name, artist)
     description = data.get("description", "")
     keywords = data.get("keywords", "")
     keyword_text = ", ".join(keywords) if isinstance(keywords, list) else str(keywords)
@@ -142,66 +156,50 @@ def fetch_track_metadata(url):
 
 def update_readme(output_dir, metadata):
     """
-    Generates or parses an existing README.md file to output an up-to-date
-    Markdown log layout compiling tracks, keys, and usage credits.
+    Generates a Markdown catalog from the JSON metadata.
     """
     readme_path = os.path.join(output_dir, "README.md")
+    os.makedirs(output_dir, exist_ok=True)
     
     # Header templates
     header_title = "# Strudel Sample Vault Catalog\n\n"
     table_header = "| Track Identifier | BPM | Key | Vocal Gender | Genre | Credit / Attribution | Source Reference URL |\n| :--- | :---: | :---: | :---: | :--- | :--- | :--- |\n"
-    
-    # Build dictionary rows
-    rows = {}
-    
-    # Read existing table if file is present to update records in place safely
-    if os.path.exists(readme_path):
-        with open(readme_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        for line in lines:
-            if line.startswith("|") and not "Track Identifier" in line and not ":---" in line:
-                parts = [p.strip() for p in line.split("|")][1:-1]
-                if len(parts) >= 5:
-                    track_id = parts[0].strip("*")
-                    if len(parts) >= 7:
-                        bpm, key, vocal_gender, genre, credit, source_url = parts[1:7]
-                    else:
-                        bpm, key, credit, source_url = parts[1:5]
-                        vocal_gender, genre = "UNKNOWN", "UNKNOWN"
-                    key = normalize_key(key) or "unknown"
-                    rows[track_id] = {
-                        "bpm": bpm,
-                        "key": key,
-                        "vocal_gender": vocal_gender,
-                        "genre": genre,
-                        "credit": credit,
-                        "source_url": source_url,
-                    }
-                    
-    # Generate / Update rows from current metadata pool state
-    for track_id, meta in metadata.items():
-        source_url = meta.get("source_url", "")
-        url_md = f"[Source Link]({source_url})" if source_url else "N/A"
-        rows[track_id] = {
-            "bpm": meta.get("bpm", "UNKNOWN"),
-            "key": normalize_key(meta.get("key")) or "unknown",
-            "vocal_gender": meta.get("vocal_gender") or "UNKNOWN",
-            "genre": meta.get("genre") or "UNKNOWN",
-            "credit": meta.get("credit") or "Unknown",
-            "source_url": url_md,
-        }
+
+    def track_sort_key(item):
+        track_id, meta = item
+        genre = meta.get("genre")
+        bpm = meta.get("bpm")
+        try:
+            numeric_bpm = float(bpm)
+            bpm_unknown = not math.isfinite(numeric_bpm)
+        except (TypeError, ValueError):
+            numeric_bpm = 0.0
+            bpm_unknown = True
+        key = normalize_key(meta.get("key"))
+        return (
+            is_unknown_metadata(genre),
+            str(genre or "").casefold(),
+            bpm_unknown,
+            numeric_bpm,
+            not bool(key),
+            key.casefold(),
+            track_id.casefold(),
+        )
 
     # Write out cleanly structured document
     with open(readme_path, "w", encoding="utf-8") as f:
         f.write(header_title)
         f.write("This file is automatically managed by the CLI processing tool to log sample origins for simple copy-pasting into track releases.\n\n")
         f.write(table_header)
-        for track_id in sorted(rows.keys()):
-            row = rows[track_id]
+        for track_id, meta in sorted(metadata.items(), key=track_sort_key):
+            source_url = meta.get("source_url", "")
+            url_md = f"[Source Link]({source_url})" if source_url else "N/A"
             f.write(
-                f"| **{track_id}** | {row['bpm']} | {row['key']} | "
-                f"{row['vocal_gender']} | {row['genre']} | {row['credit']} | "
-                f"{row['source_url']} |\n"
+                f"| **{track_id}** | {meta.get('bpm', 'UNKNOWN')} | "
+                f"{normalize_key(meta.get('key')) or 'unknown'} | "
+                f"{meta.get('vocal_gender') or 'UNKNOWN'} | "
+                f"{meta.get('genre') or 'UNKNOWN'} | "
+                f"{meta.get('credit') or 'Unknown'} | {url_md} |\n"
             )
             
     print(f"Updated cleartext tracking index documentation at: {readme_path}")
@@ -298,6 +296,7 @@ def process_cli():
     metadata_modes = parser.add_mutually_exclusive_group()
     metadata_modes.add_argument("--metadata-only", action="store_true", help="Only update the JSON metadata and README table; skip all audio processing")
     metadata_modes.add_argument("--refresh-metadata", action="store_true", help="Refetch missing or unknown metadata from saved source URLs; skip audio processing")
+    metadata_modes.add_argument("--rebuild-readme", action="store_true", help="Regenerate README.md from JSON metadata without processing audio or fetching metadata")
     parser.add_argument("--bpm", type=float, default=None, help="Tempo of the track (auto-filled from --url if omitted)")
     parser.add_argument("--key", default=None, help="The global musical key of the stem track (auto-filled from --url if omitted)")
     parser.add_argument("--name", help="Custom root name variable (auto-filled from --url if omitted)")
@@ -316,13 +315,21 @@ def process_cli():
     if args.json_path is None:
         args.json_path = os.path.join(args.output_dir, "strudel.json")
 
-    if not args.metadata_only and not args.refresh_metadata:
+    if not args.metadata_only and not args.refresh_metadata and not args.rebuild_readme:
         if not args.file:
-            print("Error: --file is required unless --metadata-only or --refresh-metadata is set.")
+            print("Error: --file is required unless a metadata-only mode is selected.")
             sys.exit(1)
         if not os.path.exists(args.file):
             print(f"Error: Target path '{args.file}' does not exist.")
             sys.exit(1)
+
+    if args.rebuild_readme:
+        if not os.path.exists(args.json_path):
+            print(f"Error: JSON index '{args.json_path}' does not exist; cannot rebuild README.md.")
+            sys.exit(1)
+        master_data = load_master_data(args.json_path)
+        update_readme(args.output_dir, master_data["_metadata"])
+        return
 
     if args.refresh_metadata:
         master_data = load_master_data(args.json_path)
